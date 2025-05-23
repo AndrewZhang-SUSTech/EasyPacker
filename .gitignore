@@ -1,0 +1,4 @@
+third_party/
+out/
+CMakePresets.json
+.vscode/
