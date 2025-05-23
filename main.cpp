@@ -1,92 +1,107 @@
 #include <iostream>
-#include <windows.h>
-#include <filesystem>
-#include <cxxopts.hpp>
-#include <picosha2.h>
-#include <cmath>
-#include <optional>
-#include <regex>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <vector>
+#include <string>
+#include <optional>
+#include <regex>
+#include <cmath>
+#include <filesystem>
+#include <windows.h>
+#include <cxxopts.hpp>
+#include <picosha2.h>
 #include "unpacker_template.hpp"
 
-std::optional<cxxopts::ParseResult> parse_args(int argc, char **argv);
-bool configure_7zip();
-bool delete_old_files(std::string_view output_dir, std::string_view output_name);
-std::string build7zCommand(std::string_view output_dir, std::string_view output_name, const std::vector<std::string> &input_files, int volume_size);
-std::optional<std::vector<std::filesystem::path>> rename_files(std::string_view output_dir, std::string_view output_name);
-std::optional<std::vector<std::string>> calculate_hashes(const std::vector<std::filesystem::path>& files);
-void generate_unpacker(const std::string& output_dir,
-                      const std::vector<std::filesystem::path>& files,
-                      const std::vector<std::string>& hashes);
+namespace fs = std::filesystem;
 
-int main(int argc, char **argv)
-{
-    // 获取可执行文件所在目录并切换工作目录
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(NULL, path, MAX_PATH);
-    std::filesystem::path exePath(path);
-    std::filesystem::current_path(exePath.parent_path());
-    
-    auto result = parse_args(argc, argv);
-    if (!result) 
-    {
+// Constants namespace
+namespace constants {
+    constexpr int kMB = 1024 * 1024;
+    constexpr char kSevenZipExecutable[] = "7zr.exe";
+    constexpr char kSevenZipDownloadUrl[] = "https://7-zip.org/a/7zr.exe ";
+    constexpr char kDefaultOutputDir[] = ".\\output";
+    constexpr char kDefaultArchiveName[] = "archive";
+    constexpr char kDefaultVolumeSizeGB[] = "10.0";
+    constexpr char kVersion[] = "1.0.2";
+}
+
+// Function declarations
+std::optional<cxxopts::ParseResult> ParseCommandLineArgs(int argc, char** argv);
+bool Setup7ZipExecutable();
+bool CleanupOldArchiveFiles(const std::string& output_dir, const std::string& archive_name);
+std::string BuildCompressionCommand(const std::string& output_dir,
+                                    const std::string& archive_name,
+                                    const std::vector<std::string>& input_files,
+                                    int volume_size_kb);
+std::optional<std::vector<fs::path>> RenameVolumeFiles(const std::string& output_dir,
+                                                      const std::string& archive_name);
+std::optional<std::vector<std::string>> CalculateFileHashes(const std::vector<fs::path>& files);
+void GenerateUnpackerScript(const std::string& output_dir,
+                           const std::vector<fs::path>& files,
+                           const std::vector<std::string>& hashes);
+
+int main(int argc, char** argv) {
+    // Set working directory to executable location
+    wchar_t exe_path[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    fs::current_path(fs::path(exe_path).parent_path());
+
+    auto parse_result = ParseCommandLineArgs(argc, argv);
+    if (!parse_result) {
         return 0;
     }
 
-    std::vector<std::string> input_files = result.value()["file"].as<std::vector<std::string>>();
-    std::string output_dir = result.value()["output"].as<std::string>();
-    std::string output_name = result.value()["name"].as<std::string>();
-    int volume_size = round(result.value()["size"].as<double>() * 1024 * 1024); // Convert GB to KB
+    std::vector<std::string> input_files = parse_result.value()["file"].as<std::vector<std::string>>();
+    std::string output_dir = parse_result.value()["output"].as<std::string>();
+    std::string output_name = parse_result.value()["name"].as<std::string>();
+    int volume_size = round(parse_result.value()["size"].as<double>() * 1024 * 1024); // Convert GB to KB
     std::cout << "Input files: ";
-    for (const auto &file : input_files)
-    {
+    for (const auto& file : input_files) {
         std::cout << file << " ";
     }
-    std::cout << "\nOutput directory: " << output_dir << "\nOutput name: " << output_name << "\nVolume size: " << volume_size << " KB\n" << std::endl;
-    
-    if (!configure_7zip()) 
-    {
+    std::cout << "\nOutput directory: " << output_dir
+              << "\nOutput name: " << output_name
+              << "\nVolume size: " << (volume_size / constants::kMB) << " MB\n";
+
+    if (!Setup7ZipExecutable()) {
         system("pause");
         return 1;
     }
 
-    if (!delete_old_files(output_dir, output_name))
-    {
+    if (!CleanupOldArchiveFiles(output_dir, output_name)) {
         system("pause");
         return 1;
     }
-    
 
-    std::string cmd = build7zCommand(output_dir, output_name, input_files, volume_size);
-    // std::cout << "Executing command: " << cmd << std::endl;
-    int ret = system(cmd.c_str());
-    if (ret != 0)
-    {
+    const std::string compress_cmd = BuildCompressionCommand(
+        output_dir, output_name, input_files, volume_size
+    );
+
+    if (system(compress_cmd.c_str()) != 0) {
         std::cerr << "Error: Failed to execute command. Please check the command and try again.";
         system("pause");
         return 1;
     }
-    printf("\n");
 
-    auto renamed_files = rename_files(output_dir, output_name);
-    if (!renamed_files)
-    {
+    auto volume_files = RenameVolumeFiles(output_dir, output_name);
+    if (!volume_files) {
         system("pause");
         return 1;
     }
 
-    std::sort(renamed_files.value().begin(), renamed_files.value().end());
+    std::sort(volume_files->begin(), volume_files->end());
 
-    auto hashes = calculate_hashes(renamed_files.value());
-    if (!hashes) {
+    auto file_hashes = CalculateFileHashes(*volume_files);
+    if (!file_hashes) {
         system("pause");
         return 1;
     }
 
     try {
-        generate_unpacker(output_dir, renamed_files.value(), hashes.value());
-        std::cout << "\nunpacker.bat generated: " << output_dir << "\\unpacker.bat" << std::endl;
+        GenerateUnpackerScript(output_dir, *volume_files, *file_hashes);
+        std::cout << "\nUnpacker script generated: "
+                  << output_dir << "\\unpacker.bat" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Failed to generate unpacker script: " << e.what() << std::endl;
         system("pause");
@@ -97,243 +112,239 @@ int main(int argc, char **argv)
     return 0;
 }
 
-bool configure_7zip()
-{
-    std::filesystem::path exePath = "7zr.exe";
-    if (!std::filesystem::exists(exePath))
-    {
-        std::cerr << "Error: 7zr.exe not found in current directory. Downloading...";
-        int ret = system("curl -L -o 7zr.exe https://7-zip.com/a/7zr.exe");
-        if(ret != 0)
-        {
-            std::cerr << "Error: Failed to download 7zr.exe. You can download it manually from https://7-zip.com/a/7zr.exe" << std::endl;
-            return false;
+std::optional<cxxopts::ParseResult> ParseCommandLineArgs(int argc, char** argv) {
+    cxxopts::Options options("EasyPacker", "A simple packing tool");
+    options.add_options()
+        ("h,help", "Show help")
+        ("v,version", "Show version")
+        ("o,output", "Path to output directory",
+         cxxopts::value<std::string>()->default_value(constants::kDefaultOutputDir))
+        ("n,name", "Name of the output file",
+         cxxopts::value<std::string>()->default_value(constants::kDefaultArchiveName))
+        ("f,file", "Path to input files",
+         cxxopts::value<std::vector<std::string>>())
+        ("s,size", "Size of each volume (GB)",
+         cxxopts::value<double>()->default_value(constants::kDefaultVolumeSizeGB));
+
+    options.parse_positional({"file"});
+
+    try {
+        auto result = options.parse(argc, argv);
+
+        if (result.count("help")) {
+            std::cout << options.help() << std::endl;
+            return std::nullopt;
         }
-        std::cout << "Download complete.\n" << std::endl;
+
+        if (result.count("version")) {
+            std::cout << "EasyPacker version " << constants::kVersion << std::endl;
+            return std::nullopt;
+        }
+
+        if (!result.count("file")) {
+            std::cerr << "Error: No input files specified." << std::endl;
+            std::cout << "Use -h for more information." << std::endl;
+            return std::nullopt;
+        }
+
+        return result;
+    } catch (const cxxopts::exceptions::parsing& e) {
+        std::cerr << "Error: Failed to parse arguments: " << e.what() << std::endl;
+        return std::nullopt;
     }
+}
+
+bool Setup7ZipExecutable() {
+    if (fs::exists(constants::kSevenZipExecutable)) {
+        return true;
+    }
+
+    std::cout << "Error: 7zr.exe not found in current directory. Downloading...";
+    std::string download_cmd = "curl -L -o ";
+    download_cmd += constants::kSevenZipExecutable;
+    download_cmd += " ";
+    download_cmd += constants::kSevenZipDownloadUrl;
+
+    if (system(download_cmd.c_str()) != 0) {
+        std::cerr << "Error: Failed to download 7zr.exe. You can download it manually from "
+                  << constants::kSevenZipDownloadUrl << std::endl;
+        return false;
+    }
+
+    std::cout << "Download complete.\n" << std::endl;
     return true;
 }
 
-std::optional<cxxopts::ParseResult> parse_args(int argc, char **argv)
-{
-    cxxopts::Options options("EasyPacker", "A simple packing tool");
-    options.add_options()
-        ("h, help", "Show help")
-        ("v, version", "Show version")
-        ("o, output", "Path to output directory", cxxopts::value<std::string>()->default_value(".\\output"))
-        ("n, name", "Name of the output file", cxxopts::value<std::string>()->default_value("archive"))
-        ("f, file", "Path to input files", cxxopts::value<std::vector<std::string>>())
-        ("s, size", "Size of each volume (GB)", cxxopts::value<double>()->default_value("10"));
-    options.parse_positional({"file"});
-    
-    auto result = options.parse(argc, argv);
-    if (result.count("help"))
-    {
-        std::cout << options.help() << std::endl;
-        return std::nullopt;
-    }
-    if (result.count("version"))
-    {
-        std::cout << "EasyPacker version 1.0.0" << std::endl;
-        return std::nullopt;
-    }
-    if (!result.count("file"))
-    {
-        std::cerr << "Error: No input files specified." << std::endl;
-        std::cout << "Use -h for more information." << std::endl;
-        return std::nullopt;
-    }
-    return result;
-}
-
-bool delete_old_files(std::string_view output_dir, std::string_view output_name)
-{
-    namespace fs = std::filesystem;
-    try 
-    {
-        // 检查目录是否存在，不存在则创建
-        if (!fs::exists(output_dir))
-        {
+bool CleanupOldArchiveFiles(const std::string& output_dir, const std::string& archive_name) {
+    try {
+        if (!fs::exists(output_dir)) {
             fs::create_directories(output_dir);
             return true;
         }
 
-        std::string pattern_str = "^" + std::string(output_name) + "\\.(7z\\.)?\\d{3}$";
-        std::regex file_pattern(pattern_str);
+        const std::string pattern = "^" + archive_name + R"((\.(7z\.)?(\d{3}|bat)$)";
+        const std::regex file_pattern(pattern);
 
-        for (const auto& entry : fs::directory_iterator(output_dir)) 
-        {
-            if (entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
-                if (std::regex_match(filename, file_pattern)) {
-                    std::filesystem::remove(entry.path());
-                    std::cout << "Deleted: " << entry.path() << std::endl;
-                }
+        for (const auto& entry : fs::directory_iterator(output_dir)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string filename = entry.path().filename().string();
+            if (std::regex_match(filename, file_pattern)) {
+                fs::remove(entry.path());
+                std::cout << "Deleted: " << entry.path() << std::endl;
             }
         }
-    } catch (const fs::filesystem_error& e)
-    {
+
+        return true;
+    } catch (const fs::filesystem_error& e) {
         std::cerr << "Filesystem error: " << e.what() << std::endl;
         return false;
-    } catch (const std::exception& e) 
-    {
+    } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return false;
     }
-    return true;
 }
 
-std::string build7zCommand(std::string_view output_dir, std::string_view output_name, const std::vector<std::string> &input_files, int volume_size)
-{
-    std::string cmd;
-    cmd.reserve(2048);  // 预分配足够空间，避免多次扩容
+std::string BuildCompressionCommand(const std::string& output_dir,
+                                    const std::string& archive_name,
+                                    const std::vector<std::string>& input_files,
+                                    int volume_size_kb) {
+    std::ostringstream cmd;
+    cmd << ".\\" << constants::kSevenZipExecutable << " a -t7z ";
 
-    // 起始部分
-    cmd += ".\\7zr.exe a -t7z ";
+    // Output path with quotes to handle spaces
+    cmd << "\"" << output_dir << "\\" << archive_name << "\" ";
 
-    // 输出路径
-    cmd += '"';
-    cmd += output_dir;
-    cmd += '\\';
-    cmd += output_name;
-    cmd += "\" ";
-
-    // 输入文件（带引号防止空格路径出错）
-    for (const auto& file : input_files) 
-    {
-        cmd += '"';
-        cmd += file;
-        cmd += "\" ";
+    // Input files list
+    for (const auto& file : input_files) {
+        cmd << "\"" << file << "\" ";
     }
 
-    // 参数配置
-    cmd += "-mx=9 -ms=200m -mf -mhc -mhcf ";
-    cmd += "-m0=LZMA -mmt -r ";
+    // Compression parameters
+    cmd << "-mx=9 "          // Maximum compression level
+        << "-ms=200m "       // Solid block size
+        << "-mf "            // Enable BCJ filters
+        << "-mhc "           // Enable header compression
+        << "-mhcf "          // Enable full header compression
+        << "-m0=LZMA "       // Use LZMA algorithm
+        << "-mmt "           // Multi-threading
+        << "-r ";            // Recurse subdirectories
 
-    // 分卷大小
-    cmd += "-v";
-    cmd += std::to_string(volume_size);
-    cmd += 'k';
-    return cmd;
+    // Volume size
+    cmd << "-v" << volume_size_kb << "k";
+
+    return cmd.str();
 }
 
-std::optional<std::vector<std::filesystem::path>> rename_files(std::string_view output_dir, std::string_view output_name)
-{
-    namespace fs = std::filesystem;
-    const fs::path dir_path{output_dir};
-    const std::regex pattern{std::string("^") + std::string(output_name) + R"(\.7z\.(\d{3})$)"};
-    
-    std::vector<fs::path> renamed_paths;
-    
-    for (const auto& entry : fs::directory_iterator(dir_path)) 
-    {
-        if (!entry.is_regular_file()) 
-        {
-            continue;
-        }
+std::optional<std::vector<fs::path>> RenameVolumeFiles(const std::string& output_dir,
+                                                      const std::string& archive_name) {
+    try {
+        const fs::path dir_path(output_dir);
+        const std::regex pattern("^" + archive_name + R"(\.7z\.(\d{3})$)");
+        std::vector<fs::path> renamed_files;
 
-        const std::string filename = entry.path().filename().string();
-        std::smatch matches;
-        
-        if (std::regex_match(filename, matches, pattern)) 
-        {
-            const fs::path old_path = entry.path();
-            const fs::path new_path = dir_path / (std::string(output_name) + "." + matches[1].str());
-            
-            try 
-            {
+        for (const auto& entry : fs::directory_iterator(dir_path)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string filename = entry.path().filename().string();
+            std::smatch matches;
+
+            if (std::regex_match(filename, matches, pattern)) {
+                const fs::path old_path = entry.path();
+                const fs::path new_path = dir_path / (archive_name + "." + matches[1].str());
+
                 fs::rename(old_path, new_path);
-                std::cout << "Renamed: " << old_path.filename().string() 
-                         << " -> " << new_path.filename().string() << '\n';
-                renamed_paths.push_back(new_path);
-            } 
-            catch (const fs::filesystem_error& e) 
-            {
-                std::cerr << "Failed to rename " << old_path.filename().string() << ": " 
-                         << e.what() << '\n';
-                return std::nullopt;
+                std::cout << "Renamed: " << old_path.filename().string()
+                         << " -> " << new_path.filename().string() << std::endl;
+
+                renamed_files.push_back(new_path);
             }
         }
-    }
 
-    return renamed_paths;
+        return renamed_files;
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Failed to rename files: " << e.what() << std::endl;
+        return std::nullopt;
+    }
 }
 
-std::optional<std::vector<std::string>> calculate_hashes(const std::vector<std::filesystem::path>& files)
-{
+std::optional<std::vector<std::string>> CalculateFileHashes(const std::vector<fs::path>& files) {
     std::vector<std::string> hashes;
     hashes.reserve(files.size());
 
-    for (const auto& file : files)
-    {
-        std::ifstream fs(file, std::ios::binary);
-        if (!fs)
-        {
-            std::cerr << "Failed to open file: " << file << std::endl;
+    for (const auto& file_path : files) {
+        std::ifstream file_stream(file_path, std::ios::binary);
+        if (!file_stream) {
+            std::cerr << "Failed to open file: " << file_path << std::endl;
             return std::nullopt;
         }
 
         std::vector<unsigned char> hash(picosha2::k_digest_size);
-        picosha2::hash256(fs, hash.begin(), hash.end());
+        picosha2::hash256(file_stream, hash.begin(), hash.end());
 
-        std::stringstream ss;
-        ss << std::hex << std::nouppercase << std::setfill('0');
-        for (unsigned char byte : hash)
-        {
-            ss << std::setw(2) << static_cast<int>(byte);
+        std::ostringstream hex_stream;
+        hex_stream << std::hex << std::nouppercase << std::setfill('0');
+        for (unsigned char byte : hash) {
+            hex_stream << std::setw(2) << static_cast<int>(byte);
         }
 
-        hashes.push_back(ss.str());
+        hashes.push_back(hex_stream.str());
     }
 
     return hashes;
 }
 
-void generate_unpacker(const std::string& output_dir,
-                      const std::vector<std::filesystem::path>& files,
-                      const std::vector<std::string>& hashes)
-{
-    namespace fs = std::filesystem;
-    fs::path script_path = fs::path(output_dir) / "unpacker.bat";
-    
-    // 复制7zr.exe到输出目录
+void GenerateUnpackerScript(const std::string& output_dir,
+                           const std::vector<fs::path>& files,
+                           const std::vector<std::string>& hashes) {
+    const fs::path script_path = fs::path(output_dir) / "unpacker.bat";
+
+    // Copy 7zr.exe to output directory
     try {
-        if (fs::exists("7zr.exe")) {
-            fs::copy_file("7zr.exe", 
-                         fs::path(output_dir) / "7zr.exe", 
-                         fs::copy_options::overwrite_existing);
+        const fs::path source_7zr = constants::kSevenZipExecutable;
+        const fs::path target_7zr = fs::path(output_dir) / constants::kSevenZipExecutable;
+
+        if (fs::exists(source_7zr)) {
+            fs::copy_file(source_7zr, target_7zr, fs::copy_options::overwrite_existing);
+            std::cout << "[Copy] 7zr.exe copied to output directory" << std::endl;
         }
     } catch (const fs::filesystem_error& e) {
         throw std::runtime_error("Failed to copy 7zr.exe: " + std::string(e.what()));
     }
 
-    // 原有的脚本生成逻辑
-    std::ofstream script(script_path);
-    if (!script) {
+    // Generate batch script
+    std::ofstream script_file(script_path);
+    if (!script_file) {
         throw std::runtime_error("Failed to create unpacker script");
     }
 
-    std::string template_str(unpacker_template);
-    
-    // 生成files数组定义
-    std::stringstream files_def;
+    std::string script_content(kUnpackerTemplate);
+
+    // Generate file array definition
+    std::ostringstream files_definition;
     for (size_t i = 0; i < files.size(); ++i) {
-        files_def << "set files[" << i << "]=" 
-                 << files[i].filename().string() << "^|" 
-                 << hashes[i] << "\n";
+        files_definition << "set files[" << i << "]="
+                        << files[i].filename().string() << "^|"
+                        << hashes[i] << "\n";
     }
-    
-    // 替换模板中的占位符
-    size_t count = files.size() - 1;
-    template_str.replace(
-        template_str.find(":: 此处将由C++填充files数组"), 
-        strlen(":: 此处将由C++填充files数组"),
-        files_def.str());
-    
-    template_str.replace(
-        template_str.find("%COUNT%"),
-        strlen("%COUNT%"),
-        std::to_string(count));
-    
-    script << template_str;
+
+    // Replace template placeholders
+    const std::string files_placeholder = ":: GENERATED_FILES_ARRAY_PLACEHOLDER";
+    const std::string count_placeholder = "VOLUME_COUNT_PLACEHOLDER";
+
+    // Replace file array
+    size_t pos = script_content.find(files_placeholder);
+    if (pos != std::string::npos) {
+        script_content.replace(pos, files_placeholder.length(), files_definition.str());
+    }
+
+    // Replace volume count
+    pos = script_content.find(count_placeholder);
+    if (pos != std::string::npos) {
+        script_content.replace(pos, count_placeholder.length(),
+                              std::to_string(files.size() - 1));
+    }
+
+    script_file << script_content;
+    if (!script_file) {
+        throw std::runtime_error("Failed to write unpacker script");
+    }
 }

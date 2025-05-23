@@ -1,14 +1,17 @@
+#pragma once
 #include <string_view>
 
-constexpr std::string_view unpacker_template = R"!!(
+// 批处理解包脚本模板
+constexpr std::string_view kUnpackerTemplate = R"!!(
 @echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
-:: === C++自动生成部分开始 ===
-:: 此处将由C++填充files数组
-:: === C++自动生成部分结束 ===
+:: === 文件信息数组（由C++代码自动生成）===
+:: GENERATED_FILES_ARRAY_PLACEHOLDER
+:: === 文件信息数组结束 ===
 
+echo [信息] 开始文件校验...
 set errorFlag=0
 set i=0
 
@@ -17,6 +20,7 @@ if defined files[%i%] (
     for /F "tokens=1,2 delims=|" %%A in ("!files[%i%]!") do (
         set "filename=%%A"
         set "expected=%%B"
+        
         if not exist "%%A" (
             echo [警告] 文件未找到: %%A
             set errorFlag=1
@@ -26,6 +30,7 @@ if defined files[%i%] (
                 set "actual=%%H"
                 goto :check_hash
             )
+            
             :check_hash
             set "actual=!actual: =!"
             if /I "!actual!" NEQ "!expected!" (
@@ -33,6 +38,8 @@ if defined files[%i%] (
                 echo         预期: !expected!
                 echo         实际: !actual!
                 set errorFlag=1
+            ) else (
+                echo [成功] %%A 校验通过
             )
         )
     )
@@ -47,40 +54,54 @@ if %errorFlag% NEQ 0 (
     exit /b 1
 )
 
-:: === 检查7zr.exe是否存在，否则下载 ===
+echo [信息] 所有文件校验成功！
+
+:: 检查7zr.exe是否存在
 if not exist "7zr.exe" (
-    echo 未找到 7zr.exe，正在下载...（此处杀毒软件可能会误报，直接信任或者从https://www.7-zip.org/a/7zr.exe下载）
+    echo [信息] 未找到7zr.exe，正在下载...
+    echo [注意] 杀毒软件可能误报，请选择信任或从 https://www.7-zip.org/a/7zr.exe 手动下载
     powershell -ExecutionPolicy Bypass -Command ^
-        "Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe ' -OutFile '7zr.exe'" || (
-        echo 下载失败，退出
+        "Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile '7zr.exe'" || (
+        echo [错误] 下载失败，退出
+        pause
         exit /b 1
     )
+    echo [成功] 7zr.exe 下载完成
 )
 
-echo 正在合并指定分卷...
+:: 合并分卷文件
 set merge_list=
-for /l %%i in (0,1,%COUNT%) do (
+for /l %%i in (0,1,%VOLUME_COUNT%) do (
     for /F "tokens=1,2 delims=^|" %%A in ("!files[%%i]!") do (
-        set merge_list=!merge_list!+%%A
+        if not defined merge_list (
+            set merge_list=%%A
+        ) else (
+            set merge_list=!merge_list!+%%A
+        )
     )
 )
-set "merge_list=!merge_list:~1!"  :: 去掉第一个加号
 
-echo 正在合并分卷: !merge_list!
+echo [执行] 合并命令: copy /b !merge_list! full_archive.7z
 copy /b !merge_list! full_archive.7z >nul
 if errorlevel 1 (
-    echo 合并失败
+    echo [错误] 分卷合并失败
+    pause
     exit /b 1
 )
 
-:: === 解压缩 ===
-echo 正在解压 full_archive.7z...
+:: 解压缩归档文件
+echo [信息] 正在解压 full_archive.7z...
 7zr.exe x full_archive.7z -bsp1
 if errorlevel 1 (
-    echo 解压失败
+    echo [错误] 解压缩失败
+    pause
     exit /b 1
 )
 
-echo 所有操作成功完成！
+:: 清理临时文件
+del full_archive.7z >nul 2>&1
+
+echo [成功] 所有操作完成！文件已解压到当前目录
+pause
 exit /b 0
 )!!";
