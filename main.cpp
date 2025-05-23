@@ -1,4 +1,5 @@
 #include <iostream>
+#include <windows.h>
 #include <filesystem>
 #include <cxxopts.hpp>
 #include <picosha2.h>
@@ -22,7 +23,9 @@ void generate_unpacker(const std::string& output_dir,
 int main(int argc, char **argv)
 {
     // 获取可执行文件所在目录并切换工作目录
-    std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    std::filesystem::path exePath(path);
     std::filesystem::current_path(exePath.parent_path());
     
     auto result = parse_args(argc, argv);
